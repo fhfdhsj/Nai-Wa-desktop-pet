@@ -191,9 +191,29 @@ def make_sounds() -> None:
     print("sound assets -> pop, boing, happy")
 
 
+def make_app_icon() -> None:
+    source = ASSET_DIR / "laugh" / "f0100.webp"
+    if not source.exists():
+        source = ASSET_DIR / "idle.png"
+    image = Image.open(source).convert("RGBA")
+    box = image.getchannel("A").getbbox()
+    if box:
+        image = image.crop(box)
+    side = max(image.width, image.height)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.alpha_composite(image, ((side - image.width) // 2, (side - image.height) // 2))
+    canvas = canvas.resize((256, 256), Image.Resampling.LANCZOS)
+    canvas.save(
+        ASSET_DIR / "app.ico",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    print("app icon -> assets/app.ico")
+
+
 def main() -> None:
     make_eye_assets()
     make_sounds()
+    make_app_icon()
 
 
 if __name__ == "__main__":
