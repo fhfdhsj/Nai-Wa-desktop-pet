@@ -38,7 +38,7 @@ except ImportError:
 
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 def resource_root() -> Path:
@@ -69,12 +69,15 @@ DEFAULT_SIZE = 2
 ANIMATION_KEYS = ("quiet", "normal", "active")
 ANIMATION_LABELS = ("安静", "普通", "活跃")
 ANIMATION_DELAYS = {"quiet": (40000, 70000), "normal": (14000, 28000), "active": (7000, 14000)}
+CRAWL_DIR = ASSET_DIR / "crawl"
 POSE_FILES = {
     "idle": "idle_eyes.png",
     "wave_left": "wave_left.png",
     "wave_right": "wave_right.png",
     "side": "side.png",
     "back": "back.png",
+    "tummy": "tummy.png",
+    "peace": "peace.png",
 }
 
 WAVE_LINES = (
@@ -259,6 +262,14 @@ class NaiWaPet:
         self.laugh_render_size = (1, 1)
         self.laugh_cache: OrderedDict[int, tuple[ImageTk.PhotoImage, bytes, int, int, tuple[int, int]]] = OrderedDict()
 
+        self.crawling = False
+        self.crawl_index = -1
+        self.crawl_start = 0.0
+        self.crawl_photo: ImageTk.PhotoImage | None = None
+        self.crawl_alpha: tuple[bytes, int, int] | None = None
+        self.crawl_render_size = (1, 1)
+        self.crawl_cache: OrderedDict[tuple[int, int], tuple[ImageTk.PhotoImage, bytes, int, int, tuple[int, int]]] = OrderedDict()
+
         self._build_scene()
         self._build_menu()
         self._bind_events()
@@ -302,6 +313,7 @@ class NaiWaPet:
 
         laugh_dir = ASSET_DIR / "laugh"
         self.laugh_frames = sorted(laugh_dir.glob("f*.webp")) if laugh_dir.exists() else []
+        self.crawl_frames = sorted(CRAWL_DIR.glob("f*.png")) if CRAWL_DIR.exists() else []
 
     def _build_scene(self) -> None:
         self.shadow = self.canvas.create_oval(
@@ -517,40 +529,21 @@ class NaiWaPet:
     def _build_menu(self) -> None:
         self.menu = tk.Menu(self.root, tearoff=False)
         self.menu.add_command(label="摸摸奶蛙", command=self.poke)
+        self.menu.add_command(label="比个耶", command=lambda: self.show_special_pose("peace"))
+        self.menu.add_command(label="翻肚皮", command=lambda: self.show_special_pose("tummy"))
+        self.menu.add_command(label="趴趴走", command=self.play_crawl)
+        self.menu.add_separator()
         self.menu.add_command(label="捧腹大笑", command=self.start_laugh)
         self.menu.add_command(label="停止大笑", command=self.stop_laugh)
-        self.menu.add_command(label="换个姿势", command=self.random_action)
+        self.menu.add_command(label="随机动作", command=self.random_action)
+        self.menu.add_separator()
         self.menu.add_command(label="设置…", command=self.open_settings_ui)
         self.menu.add_command(label="隐藏到托盘", command=self.hide_to_tray)
         self.menu.add_separator()
-
-        self.size_var = tk.IntVar(master=self.root, value=self.size_index)
-        size_menu = tk.Menu(self.menu, tearoff=False)
-        for index, (label, _) in enumerate(SIZE_PRESETS):
-            size_menu.add_radiobutton(
-                label=label,
-                value=index,
-                variable=self.size_var,
-                command=lambda i=index: self.set_size(i),
-            )
-        self.menu.add_cascade(label="大小", menu=size_menu)
-        self.menu.add_checkbutton(
-            label="音效",
-            variable=self.sound_enabled,
-            command=self._toggle_sound,
-        )
-        self.menu.add_checkbutton(
-            label="对话气泡",
-            variable=self.bubble_enabled,
-            command=self._toggle_bubble,
-        )
-        self.menu.add_separator()
-        self.menu.add_command(label="休息一下", command=self.sleep)
-        self.menu.add_command(label="唤醒奶蛙", command=self.wake)
-        self.menu.add_command(label="回到右下角", command=self.reset_position)
-        self.menu.add_separator()
+        self.menu.add_command(label="休息 / 唤醒", command=self.toggle_sleep)
         self.menu.add_command(label="使用说明", command=self.show_help)
         self.menu.add_command(label="退出桌宠", command=self.quit)
+
 
     def _bind_events(self) -> None:
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -656,7 +649,7 @@ class NaiWaPet:
                 setattr(self, attr, None)
 
     def _schedule_random_action(self, delay_ms: int | None = None) -> None:
-        if self.sleeping or self.laughing or self.press_active or self.motion_active:
+        if self.sleeping or self.laughing or self.crawling or self.press_active or self.motion_active:
             return
         if self.action_after:
             self.root.after_cancel(self.action_after)
@@ -676,12 +669,15 @@ class NaiWaPet:
         if self.sleeping:
             self.wake()
             return
-        if self.laughing or self.press_active or self.dragging or self.motion_active:
+        if self.laughing or self.crawling or self.press_active or self.dragging or self.motion_active:
             self.action_after = self.root.after(4500, self.random_action)
             return
+        if self.crawl_frames and random.random() < 0.18:
+            self.play_crawl()
+            return
         self._cancel_timers()
-        self._set_pose(random.choice(("wave_left", "wave_right", "side")))
-        if self.pose == "side":
+        self._set_pose(random.choice(("wave_left", "wave_right", "side", "peace", "tummy")))
+        if self.pose in ("side", "tummy"):
             if random.random() < 0.7:
                 self._say(random.choice(SIDE_LINES))
         else:
@@ -692,7 +688,7 @@ class NaiWaPet:
 
     def _return_to_idle(self) -> None:
         self.pose_after = None
-        if self.sleeping or self.laughing:
+        if self.sleeping or self.laughing or self.crawling:
             return
         self._set_pose("idle")
         self._hide_shadow()
@@ -711,6 +707,98 @@ class NaiWaPet:
         self._trigger_jelly(0.10)
         self.pose_after = self.root.after(1700, self._return_to_idle)
 
+    def show_special_pose(self, pose: str) -> None:
+        if self.sleeping:
+            self.wake()
+        if self.laughing:
+            return
+        if self.crawling:
+            self.stop_crawl()
+        self._cancel_timers()
+        self._cancel_bubble()
+        self._set_pose(pose)
+        self._show_shadow()
+        self._play_sound("pop")
+        self._trigger_jelly(0.08)
+        if pose == "peace":
+            self._say("今天也要元气满满！", 1500)
+        elif pose == "tummy":
+            self._say("翻肚皮～", 1300)
+        self.pose_after = self.root.after(2100, self._return_to_idle)
+
+    def toggle_sleep(self) -> None:
+        if self.sleeping:
+            self.wake()
+        else:
+            self.sleep()
+
+    def play_crawl(self) -> None:
+        if not self.crawl_frames:
+            self.show_special_pose("side")
+            return
+        if self.sleeping:
+            self.wake()
+        if self.laughing:
+            return
+        self._stop_motion()
+        self._cancel_timers()
+        self._cancel_bubble()
+        self.crawling = True
+        self.crawl_start = time.monotonic()
+        self.crawl_index = -1
+        self.pose = "crawl"
+        self._static_key = None
+        self._show_shadow()
+        self._show_crawl_frame(0)
+        self._play_sound("boing")
+
+    def _crawl_frame(self, index: int):
+        index = max(0, min(len(self.crawl_frames) - 1, int(index)))
+        key = (self.size_index, index)
+        cached = self.crawl_cache.get(key)
+        if cached is not None:
+            self.crawl_cache.move_to_end(key)
+            return cached
+        with Image.open(self.crawl_frames[index]) as source:
+            base = source.convert("RGBA")
+        size = (
+            max(1, round(base.width * self.scale)),
+            max(1, round(base.height * self.scale)),
+        )
+        resized = base.resize(size, Image.Resampling.BILINEAR)
+        photo = self._photo_from_rgba(resized)
+        alpha = base.getchannel("A").point(lambda value: 255 if value >= ALPHA_CUTOFF else 0)
+        entry = (photo, alpha.tobytes(), base.width, base.height, size)
+        self.crawl_cache[key] = entry
+        return entry
+
+    def _show_crawl_frame(self, index: int) -> None:
+        photo, alpha, base_w, base_h, size = self._crawl_frame(index)
+        self.crawl_photo = photo
+        self.crawl_alpha = (alpha, base_w, base_h)
+        self.crawl_index = index
+        self.crawl_render_size = size
+        self.current_size = size
+        self.sprite_y = float(GROUND_Y)
+        self.canvas.itemconfigure(self.sprite, image=photo)
+        self.canvas.coords(self.sprite, CENTER_X, self.sprite_y)
+        for item in self.eye_items:
+            self.canvas.itemconfigure(item, state="hidden")
+        if self.shadow_visible:
+            width = max(48, round(size[0] * 0.38))
+            self.canvas.coords(self.shadow, CENTER_X - width / 2, GROUND_Y - 10, CENTER_X + width / 2, GROUND_Y + 7)
+            self.canvas.itemconfigure(self.shadow, state="normal")
+            self.canvas.tag_lower(self.shadow)
+
+    def stop_crawl(self) -> None:
+        if not self.crawling:
+            return
+        self.crawling = False
+        self._set_pose("idle")
+        self._hide_shadow()
+        self._schedule_random_action()
+
+
     def start_laugh(self) -> None:
         if not self.laugh_frames:
             self._say("没有找到大笑素材。", 1400)
@@ -720,6 +808,7 @@ class NaiWaPet:
         self._cancel_bubble()
         self.sleeping = False
         self.excited = False
+        self.crawling = False
         self.laughing = True
         self.laugh_start = time.monotonic()
         self.laugh_index = -1
@@ -809,6 +898,7 @@ class NaiWaPet:
             self.laughing = False
             self._stop_laugh_audio()
         self.excited = False
+        self.crawling = False
         self.sleeping = True
         self._set_pose("back")
         self._show_shadow()
@@ -832,10 +922,13 @@ class NaiWaPet:
             return
         self.size_index = index
         self.scale = SIZE_PRESETS[index][1]
-        self.size_var.set(index)
+        # Size is shown in the settings panel only.
         self._static_key = None
         self.pupil_photo_cache.clear()
         self.laugh_cache.clear()
+        self.crawl_cache.clear()
+        if self.crawling and self.crawl_index >= 0:
+            self._show_crawl_frame(self.crawl_index)
         if self.laughing and self.laugh_index >= 0:
             self._show_laugh_frame(self.laugh_index)
         self._save_settings()
@@ -855,8 +948,9 @@ class NaiWaPet:
             "单击：Q 弹一下\n"
             "长按后松开：蓄力回弹\n"
             "按住拖动：扔到桌面上，会受重力落下\n"
-            "短时间连点 8 次：播放完整捧腹大笑\n\n"
-            "右键可以捧腹大笑、停止大笑、换姿势、调大小、开关音效和对话气泡、休息或退出。",
+            "短时间连点 8 次：播放完整捧腹大笑\n"
+            "右键可播放比耶、翻肚皮和趴趴走动画。\n\n"
+            "大小、音效和对话气泡统一在设置面板中调整。",
             parent=self.root,
         )
 
@@ -911,6 +1005,19 @@ class NaiWaPet:
         return 1.0, 1.0
 
     def _refresh_visual(self, now: float) -> None:
+        if self.crawling:
+            self.sprite_y = float(GROUND_Y)
+            self.current_size = self.crawl_render_size
+            self.canvas.coords(self.sprite, CENTER_X, self.sprite_y)
+            for item in self.eye_items:
+                self.canvas.itemconfigure(item, state="hidden")
+            if self.shadow_visible:
+                width = max(48, round(self.crawl_render_size[0] * 0.38))
+                self.canvas.coords(self.shadow, CENTER_X - width / 2, GROUND_Y - 10, CENTER_X + width / 2, GROUND_Y + 7)
+                self.canvas.itemconfigure(self.shadow, state="normal")
+                self.canvas.tag_lower(self.shadow)
+            return
+
         if self.laughing:
             self.sprite_y = float(GROUND_Y)
             self.current_size = self.laugh_render_size
@@ -1026,10 +1133,13 @@ class NaiWaPet:
         top = self.sprite_y - height
         if not (left <= x < left + width and top <= y < top + height):
             return False
-        if self.pose == "laugh" and self.laugh_alpha is not None:
+        if self.pose == "crawl" and self.crawl_alpha is not None:
+            alpha, base_w, base_h = self.crawl_alpha
+        elif self.pose == "laugh" and self.laugh_alpha is not None:
             alpha, base_w, base_h = self.laugh_alpha
         else:
             alpha, base_w, base_h = self.alpha_masks[self.pose]
+
         bx = int((x - left) / width * base_w)
         by = int((y - top) / height * base_h)
         bx = max(0, min(base_w - 1, bx))
@@ -1037,6 +1147,9 @@ class NaiWaPet:
         return alpha[by * base_w + bx] != 0
 
     def _on_press(self, event: tk.Event) -> None:
+        if self.crawling:
+            self.stop_crawl()
+            return
         if self.laughing:
             return
         if self.menu_open or not self._is_on_pet(event.x, event.y):
@@ -1176,6 +1289,14 @@ class NaiWaPet:
                 self._show_laugh_frame(index)
             if elapsed >= len(self.laugh_frames) / LAUGH_FPS:
                 self.stop_laugh()
+
+        if self.crawling:
+            elapsed = now - self.crawl_start
+            frame = int(elapsed * 8.0) % len(self.crawl_frames)
+            if frame != self.crawl_index:
+                self._show_crawl_frame(frame)
+            if elapsed >= 2.2:
+                self.stop_crawl()
 
         if now - self.last_render >= 1 / 30:
             self.last_render = now
