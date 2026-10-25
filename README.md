@@ -45,10 +45,3 @@ python prepare_assets.py
 ```
 
 重新生成素材需要 Pillow 和 NumPy。
-
-## 设计参考
-
-交互手感参考了 GitHub 项目 [jiasjdia/naiwa](https://github.com/jiasjdia/naiwa) 中眼神跟随、Q 弹、拖拽物理、捧腹大笑和设置记忆等设计。
-
-- 眼神图层和提示音效由当前项目的奶蛙素材本地生成。
-- 432 帧大笑动画和笑声音轨取自上述仓库，按用户要求集成；上游未附明确素材许可证，详见 `ASSET_SOURCES.md`。
