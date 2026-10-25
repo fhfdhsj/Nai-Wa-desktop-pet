@@ -95,4 +95,8 @@ git push origin v1.1.0
 python prepare_assets.py
 ```
 
+<<<<<<< HEAD
 需要 Pillow 和 NumPy。素材来源说明见 `ASSET_SOURCES.md`。
+=======
+重新生成素材需要 Pillow 和 NumPy。
+>>>>>>> origin/main
