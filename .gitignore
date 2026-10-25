@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pet_venv/
+.venv/
+venv/
+pet_settings.json
+*.log
+.DS_Store
+Thumbs.db
