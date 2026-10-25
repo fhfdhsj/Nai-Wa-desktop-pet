@@ -3,13 +3,15 @@ from __future__ import annotations
 import ctypes
 import json
 import math
+import os
+import queue
 import random
 import sys
 import time
 import tkinter as tk
 from collections import OrderedDict, deque
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 try:
     from PIL import Image, ImageTk
@@ -29,11 +31,27 @@ try:
 except ImportError:
     winsound = None
 
+try:
+    import pystray
+except ImportError:
+    pystray = None
 
-ROOT_DIR = Path(__file__).resolve().parent
+
+
+APP_VERSION = "1.1.0"
+
+
+def resource_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+ROOT_DIR = resource_root()
 ASSET_DIR = ROOT_DIR / "assets"
 SFX_DIR = ASSET_DIR / "sfx"
-SETTINGS_PATH = ROOT_DIR / "pet_settings.json"
+APP_HOME = (Path(os.environ.get("LOCALAPPDATA", Path.home())) / "NaiWaDesktopPet") if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+SETTINGS_PATH = APP_HOME / "pet_settings.json"
 EYE_GEOMETRY_PATH = ASSET_DIR / "eye_geometry.json"
 
 KEY_COLOR = "#ff00ff"
@@ -48,6 +66,9 @@ ALPHA_CUTOFF = 110
 MUTEX_NAME = "Local\\NaiWaDesktopPet_Enhanced_v2"
 SIZE_PRESETS = (("小", 0.72), ("中", 0.86), ("大", 1.0))
 DEFAULT_SIZE = 2
+ANIMATION_KEYS = ("quiet", "normal", "active")
+ANIMATION_LABELS = ("安静", "普通", "活跃")
+ANIMATION_DELAYS = {"quiet": (40000, 70000), "normal": (14000, 28000), "active": (7000, 14000)}
 POSE_FILES = {
     "idle": "idle_eyes.png",
     "wave_left": "wave_left.png",
@@ -101,7 +122,7 @@ def get_work_area(root: tk.Tk) -> tuple[int, int, int, int]:
 
 
 def load_settings() -> dict:
-    defaults = {"size": DEFAULT_SIZE, "sound": True, "bubble": False, "x": None, "y": None}
+    defaults = {"size": DEFAULT_SIZE, "sound": True, "bubble": False, "topmost": True, "animation": "normal", "x": None, "y": None}
     try:
         data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
@@ -113,10 +134,15 @@ def load_settings() -> dict:
     except Exception:
         defaults["size"] = DEFAULT_SIZE
     defaults["sound"] = bool(defaults.get("sound", True))
+    defaults["bubble"] = bool(defaults.get("bubble", False))
+    defaults["topmost"] = bool(defaults.get("topmost", True))
+    if defaults.get("animation") not in ANIMATION_DELAYS:
+        defaults["animation"] = "normal"
     return defaults
 
 
 def save_settings(settings: dict) -> None:
+    APP_HOME.mkdir(parents=True, exist_ok=True)
     try:
         SETTINGS_PATH.write_text(
             json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
@@ -144,9 +170,9 @@ class NaiWaPet:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.settings = load_settings()
-        self.root.title("奶蛙桌宠")
+        self.root.title(f"奶蛙桌宠 v{APP_VERSION}")
         self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", bool(self.settings.get("topmost", True)))
         self.root.configure(bg=KEY_COLOR)
         if sys.platform == "win32":
             self.root.wm_attributes("-transparentcolor", KEY_COLOR)
@@ -167,7 +193,20 @@ class NaiWaPet:
         self.scale = SIZE_PRESETS[self.size_index][1]
         self.sound_enabled = tk.BooleanVar(master=root, value=bool(self.settings.get("sound", True)))
         self.bubble_enabled = tk.BooleanVar(master=root, value=bool(self.settings.get("bubble", False)))
+        self.topmost_enabled = tk.BooleanVar(master=root, value=bool(self.settings.get("topmost", True)))
+        self.animation_mode = tk.StringVar(master=root, value=str(self.settings.get("animation", "normal")))
         self.menu_open = False
+        self.settings_window: tk.Toplevel | None = None
+        self.tray_icon = None
+        self.tray_queue: queue.Queue[str] = queue.Queue()
+        self.hidden = False
+        self.closed = False
+        icon_path = ASSET_DIR / "app.ico"
+        if sys.platform == "win32" and icon_path.exists():
+            try:
+                self.root.iconbitmap(default=str(icon_path))
+            except tk.TclError:
+                pass
 
         self.base_images: dict[str, Image.Image] = {}
         self.alpha_masks: dict[str, tuple[bytes, int, int]] = {}
@@ -227,6 +266,8 @@ class NaiWaPet:
         self._refresh_visual(time.monotonic())
         self.root.after(900, self._schedule_random_action)
         self.root.after(16, self._animate)
+        self._setup_tray()
+        self.root.after(150, self._poll_tray)
 
     def _load_assets(self) -> None:
         missing = []
@@ -320,12 +361,167 @@ class NaiWaPet:
         )
         self._raise_bubble()
 
+    def _setup_tray(self) -> None:
+        icon_path = ASSET_DIR / "app.ico"
+        if pystray is None or not icon_path.exists():
+            return
+        try:
+            image = Image.open(icon_path).convert("RGBA")
+            menu = pystray.Menu(
+                pystray.MenuItem("显示奶蛙", lambda *_: self._queue_tray("show"), default=True),
+                pystray.MenuItem("隐藏奶蛙", lambda *_: self._queue_tray("hide")),
+                pystray.MenuItem("设置", lambda *_: self._queue_tray("settings")),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("退出", lambda *_: self._queue_tray("quit")),
+            )
+            self.tray_icon = pystray.Icon("NaiWaDesktopPet", image, f"奶蛙桌宠 v{APP_VERSION}", menu)
+            self.tray_icon.run_detached()
+        except Exception:
+            self.tray_icon = None
+
+    def _queue_tray(self, action: str) -> None:
+        self.tray_queue.put(action)
+
+    def _poll_tray(self) -> None:
+        if self.closed:
+            return
+        try:
+            while True:
+                action = self.tray_queue.get_nowait()
+                if action == "show":
+                    self.show_pet()
+                elif action == "hide":
+                    self.hide_to_tray()
+                elif action == "settings":
+                    self.show_pet()
+                    self.open_settings_ui()
+                elif action == "quit":
+                    self.quit()
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(150, self._poll_tray)
+
+    def show_pet(self) -> None:
+        self.hidden = False
+        self.root.deiconify()
+        self.root.attributes("-topmost", bool(self.topmost_enabled.get()))
+        self.root.lift()
+
+    def hide_to_tray(self) -> None:
+        if self.tray_icon is None:
+            messagebox.showinfo("奶蛙桌宠", "系统托盘不可用，请直接最小化或退出。", parent=self.root)
+            return
+        self.hidden = True
+        self.root.withdraw()
+        try:
+            self.tray_icon.notify("奶蛙还在托盘里，双击图标可以回来。", "奶蛙桌宠")
+        except Exception:
+            pass
+
+    def open_settings_ui(self) -> None:
+        if self.settings_window is not None:
+            try:
+                if self.settings_window.winfo_exists():
+                    self.settings_window.deiconify()
+                    self.settings_window.lift()
+                    self.settings_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self.settings_window = None
+
+        window = tk.Toplevel(self.root)
+        self.settings_window = window
+        window.title(f"奶蛙桌宠 v{APP_VERSION} - 设置")
+        window.configure(bg="#f6efe2")
+        window.resizable(False, False)
+        window.attributes("-topmost", True)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self._close_settings_ui)
+        icon_path = ASSET_DIR / "app.ico"
+        if sys.platform == "win32" and icon_path.exists():
+            try:
+                window.iconbitmap(default=str(icon_path))
+            except tk.TclError:
+                pass
+
+        style = ttk.Style(window)
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 14, "bold"), foreground="#5c4327")
+        style.configure("Hint.TLabel", foreground="#806b54")
+
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="奶蛙桌宠", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text=f"版本 {APP_VERSION}", style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 16))
+
+        size_var = tk.StringVar(value=SIZE_PRESETS[self.size_index][0])
+        ttk.Label(frame, text="大小").grid(row=2, column=0, sticky="w", pady=7)
+        ttk.Combobox(frame, textvariable=size_var, values=[item[0] for item in SIZE_PRESETS], state="readonly", width=18).grid(row=2, column=1, sticky="ew", padx=(18, 0), pady=7)
+
+        current_animation = self.animation_mode.get()
+        animation_label = ANIMATION_LABELS[ANIMATION_KEYS.index(current_animation)] if current_animation in ANIMATION_KEYS else "普通"
+        animation_var = tk.StringVar(value=animation_label)
+        ttk.Label(frame, text="随机动作频率").grid(row=3, column=0, sticky="w", pady=7)
+        ttk.Combobox(frame, textvariable=animation_var, values=list(ANIMATION_LABELS), state="readonly", width=18).grid(row=3, column=1, sticky="ew", padx=(18, 0), pady=7)
+
+        sound_var = tk.BooleanVar(value=self.sound_enabled.get())
+        bubble_var = tk.BooleanVar(value=self.bubble_enabled.get())
+        topmost_var = tk.BooleanVar(value=self.topmost_enabled.get())
+        ttk.Checkbutton(frame, text="启用音效", variable=sound_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 4))
+        ttk.Checkbutton(frame, text="显示对话气泡", variable=bubble_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(frame, text="窗口始终置顶", variable=topmost_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        ttk.Button(buttons, text="回到右下角", command=self.reset_position).pack(side="left")
+        ttk.Button(buttons, text="取消", command=self._close_settings_ui).pack(side="right")
+        ttk.Button(buttons, text="保存", command=lambda: self._save_settings_ui(size_var, animation_var, sound_var, bubble_var, topmost_var)).pack(side="right", padx=(0, 8))
+
+        window.update_idletasks()
+        left, top, right, bottom = get_work_area(self.root)
+        width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+        x = max(left, min(right - width, self.x + (WINDOW_WIDTH - width) // 2))
+        y = max(top, min(bottom - height, self.y - height - 12))
+        window.geometry(f"+{x}+{y}")
+        window.focus_force()
+
+    def _save_settings_ui(self, size_var, animation_var, sound_var, bubble_var, topmost_var) -> None:
+        labels = [item[0] for item in SIZE_PRESETS]
+        new_size = labels.index(size_var.get()) if size_var.get() in labels else self.size_index
+        if new_size != self.size_index:
+            self.set_size(new_size)
+        self.sound_enabled.set(bool(sound_var.get()))
+        self.bubble_enabled.set(bool(bubble_var.get()))
+        self.topmost_enabled.set(bool(topmost_var.get()))
+        self.root.attributes("-topmost", self.topmost_enabled.get())
+        label = animation_var.get() if animation_var.get() in ANIMATION_LABELS else "普通"
+        self.animation_mode.set(ANIMATION_KEYS[ANIMATION_LABELS.index(label)])
+        if not self.bubble_enabled.get():
+            self._cancel_bubble()
+        self._save_settings()
+        self._schedule_random_action()
+        self._close_settings_ui()
+
+    def _close_settings_ui(self) -> None:
+        if self.settings_window is not None:
+            try:
+                self.settings_window.destroy()
+            except tk.TclError:
+                pass
+            self.settings_window = None
+
+
     def _build_menu(self) -> None:
         self.menu = tk.Menu(self.root, tearoff=False)
         self.menu.add_command(label="摸摸奶蛙", command=self.poke)
         self.menu.add_command(label="捧腹大笑", command=self.start_laugh)
         self.menu.add_command(label="停止大笑", command=self.stop_laugh)
         self.menu.add_command(label="换个姿势", command=self.random_action)
+        self.menu.add_command(label="设置…", command=self.open_settings_ui)
+        self.menu.add_command(label="隐藏到托盘", command=self.hide_to_tray)
         self.menu.add_separator()
 
         self.size_var = tk.IntVar(master=self.root, value=self.size_index)
@@ -464,8 +660,10 @@ class NaiWaPet:
             return
         if self.action_after:
             self.root.after_cancel(self.action_after)
-        delay = delay_ms if delay_ms is not None else random.randint(14000, 28000)
-        self.action_after = self.root.after(delay, self.random_action)
+        if delay_ms is None:
+            low, high = ANIMATION_DELAYS.get(self.animation_mode.get(), ANIMATION_DELAYS["normal"])
+            delay_ms = random.randint(low, high)
+        self.action_after = self.root.after(delay_ms, self.random_action)
 
     def _set_pose(self, pose: str) -> None:
         self.pose = pose
@@ -1003,15 +1201,27 @@ class NaiWaPet:
                 "size": self.size_index,
                 "sound": bool(self.sound_enabled.get()),
                 "bubble": bool(self.bubble_enabled.get()),
+                "topmost": bool(self.topmost_enabled.get()),
+                "animation": self.animation_mode.get(),
                 "x": self.x,
                 "y": self.y,
             }
         )
 
     def quit(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._close_settings_ui()
         if self.laughing:
             self._stop_laugh_audio()
         self._save_settings()
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
         self.root.destroy()
 
 

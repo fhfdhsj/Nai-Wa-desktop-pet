@@ -1,0 +1,41 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements-build.txt
+      - name: Smoke test source
+        run: python main.py --self-test
+      - name: Build EXE
+        run: python tools/build_release.py
+      - name: Smoke test EXE
+        shell: pwsh
+        run: |
+          $process = Start-Process dist/NaiWaDesktopPet.exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NaiWaDesktopPet
+          path: dist/NaiWaDesktopPet.exe
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create $env:GITHUB_REF_NAME dist/NaiWaDesktopPet.exe --generate-notes --title $env:GITHUB_REF_NAME

@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
 
-python -c "import PIL" >nul 2>&1
+python -c "import PIL, pystray" >nul 2>&1
 if errorlevel 1 (
     echo Installing required packages...
     python -m pip install -r requirements.txt
